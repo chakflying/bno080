@@ -20,7 +20,7 @@ keywords = [
 readme = "README.md"
 
 [dependencies]
-embedded-hal = { version = "0.2.3", features = ["unproven"] }
+embedded-hal = { version = "0.2.7", features = ["unproven"] }
 panic-rtt-core = {version="0.1.0", optional=true}
 
 [features]
