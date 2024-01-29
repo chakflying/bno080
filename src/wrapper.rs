@@ -64,6 +64,9 @@ pub struct BNO080<SI> {
     /// Linear acceleration vector
     linear_accel: [f32; 3],
 
+    /// Angular velocity
+    angular_velocity: [f32; 3],
+
     /// Gyroscope calibrated data
     gyro: [f32; 3],
 }
@@ -88,6 +91,7 @@ impl<SI> BNO080<SI> {
             rotation_quaternion: [0.0; 4],
             rot_quaternion_acc: 0.0,
             linear_accel: [0.0; 3],
+            angular_velocity: [0.0; 3],
             gyro: [0.0; 3],
         }
     }
@@ -99,9 +103,9 @@ impl<SI> BNO080<SI> {
 }
 
 impl<SI, SE> BNO080<SI>
-where
-    SI: SensorInterface<SensorError = SE>,
-    SE: core::fmt::Debug,
+    where
+        SI: SensorInterface<SensorError=SE>,
+        SE: core::fmt::Debug,
 {
     /// Consume all available messages on the port without processing them
     pub fn eat_all_messages(&mut self, delay: &mut impl DelayMs<u8>) {
@@ -253,7 +257,7 @@ where
 
         // let mut report_count = 0;
         let mut outer_cursor: usize = PACKET_HEADER_LENGTH + 5; //skip header, timestamp
-                                                                //TODO need to skip more above for a payload-level timestamp??
+        //TODO need to skip more above for a payload-level timestamp??
         if received_len < outer_cursor {
             #[cfg(feature = "rttdebug")]
             rprintln!("bad lens: {} < {}", received_len, outer_cursor);
@@ -261,15 +265,15 @@ where
         }
 
         let payload_len = received_len - outer_cursor;
-        if payload_len < 14 {
-            #[cfg(feature = "rttdebug")]
-            rprintln!(
-                "bad report: {:?}",
-                &self.packet_recv_buf[..PACKET_HEADER_LENGTH]
-            );
-
-            return;
-        }
+        // if payload_len < 14 {
+        //     #[cfg(feature = "rttdebug")]
+        //     rprintln!(
+        //         "bad report: {:?}",
+        //         &self.packet_recv_buf[..PACKET_HEADER_LENGTH]
+        //     );
+        //
+        //     return;
+        // }
 
         // there may be multiple reports per payload
         while outer_cursor < payload_len {
@@ -303,6 +307,39 @@ where
         //debug_println!("report_count: {}",report_count);
     }
 
+    fn handle_grv_report(&mut self, received_len: usize) {
+        let mut outer_cursor: usize = PACKET_HEADER_LENGTH;
+
+        let (inner_cursor, q_i, q_j, q_k, q_real, ax, ay, az) =
+            Self::handle_one_grv_report(
+                outer_cursor,
+                &self.packet_recv_buf[..received_len],
+            );
+
+        outer_cursor = inner_cursor;
+
+        self.update_rotation_quaternion(q_i, q_j, q_k, q_real, 0);
+        self.update_angular_velocity(ax, ay, az);
+    }
+
+    fn handle_one_grv_report(
+        outer_cursor: usize,
+        msg: &[u8],
+    ) -> (usize, i16, i16, i16, i16, i16, i16, i16) {
+        let mut cursor = outer_cursor;
+
+        (
+            cursor,
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+            Self::try_read_i16_at_cursor(msg, &mut cursor).unwrap_or(0),
+        )
+    }
+
     /// Given a set of quaternion values in the Q-fixed-point format,
     /// calculate and update the corresponding float values
     fn update_rotation_quaternion(
@@ -331,6 +368,14 @@ where
         let z = q8_to_f32(z);
 
         self.linear_accel = [x, y, z];
+    }
+
+    fn update_angular_velocity(&mut self, x: i16, y: i16, z: i16) {
+        let x = q10_to_f32(x);
+        let y = q10_to_f32(y);
+        let z = q10_to_f32(z);
+
+        self.angular_velocity = [x, y, z];
     }
 
     /// Given a set of linear acceleration values in the Q-fixed-point format,
@@ -440,6 +485,9 @@ where
             CHANNEL_SENSOR_REPORTS => {
                 self.handle_sensor_reports(received_len);
             }
+            CHANNEL_GYRO_ROTATION_REPORT => {
+                self.handle_grv_report(received_len);
+            }
             _ => {
                 self.last_chan_received = chan_num;
                 #[cfg(feature = "rttdebug")]
@@ -512,6 +560,16 @@ where
         millis_between_reports: u16,
     ) -> Result<(), WrapperError<SE>> {
         self.enable_report(SENSOR_REPORTID_GYRO, millis_between_reports)
+    }
+
+    pub fn enable_gyro_integrated_rotation_vector(
+        &mut self,
+        millis_between_reports: u16,
+    ) -> Result<(), WrapperError<SE>> {
+        self.enable_report(
+            SENSOR_REPORTID_GYRO_INTEGRATED_ROTATION_VECTOR,
+            millis_between_reports,
+        )
     }
 
     /// Enable a particular report
@@ -717,6 +775,7 @@ where
 
 const Q8_SCALE: f32 = 1.0 / ((1 << 8) as f32);
 const Q9_SCALE: f32 = 1.0 / ((1 << 9) as f32);
+const Q10_SCALE: f32 = 1.0 / ((1 << 10) as f32);
 const Q12_SCALE: f32 = 1.0 / ((1 << 12) as f32);
 const Q14_SCALE: f32 = 1.0 / ((1 << 14) as f32);
 
@@ -728,6 +787,10 @@ fn q14_to_f32(q_val: i16) -> f32 {
 
 fn q12_to_f32(q_val: i16) -> f32 {
     (q_val as f32) * Q12_SCALE
+}
+
+fn q10_to_f32(q_val: i16) -> f32 {
+    (q_val as f32) * Q10_SCALE
 }
 
 fn q8_to_f32(q_val: i16) -> f32 {
@@ -747,8 +810,10 @@ const CHANNEL_HUB_CONTROL: u8 = 2;
 /// sensor hub control channel
 const CHANNEL_SENSOR_REPORTS: u8 = 3;
 /// input sensor reports (non-wake, not gyroRV)
-//const  CHANNEL_WAKE_REPORTS: usize = 4; /// wake input sensor reports (for sensors configured as wake up sensors)
-//const  CHANNEL_GYRO_ROTATION: usize = 5; ///  gyro rotation vector (gyroRV)
+const CHANNEL_WAKE_REPORTS: u8 = 4;
+/// wake input sensor reports (for sensors configured as wake up sensors)
+const CHANNEL_GYRO_ROTATION_REPORT: u8 = 5;
+///  gyro rotation vector (gyroRV)
 
 /// Command Channel requests / responses
 
@@ -795,6 +860,7 @@ const SENSOR_REPORTID_GYRO: u8 = 0x07;
 // 0x0C humidity (percent) from external sensor: Q point 8
 // 0x0D proximity (centimeters) from external sensor: Q point 4
 // 0x0E temperature (degrees C) from external sensor: Q point 7
+const SENSOR_REPORTID_GYRO_INTEGRATED_ROTATION_VECTOR: u8 = 0x2A;
 
 /// executable/device channel responses
 /// Figure 1-27: SHTP executable commands and response
