@@ -135,7 +135,7 @@ impl<SI, SE> BNO080<SI>
             } else {
                 total_handled += handled_count;
                 //give some time to other parts of the system
-                delay.delay_ms(1);
+                // delay.delay_ms(1);
             }
         }
         total_handled
